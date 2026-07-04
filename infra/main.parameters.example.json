@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "projectName": { "value": "dataintegration" },
+    "environment": { "value": "dev" },
+    "location": { "value": "eastus" },
+    "sqlAdminLogin": { "value": "sqladmin" },
+    "sqlAdminPassword": { "reference": { "keyVault": { "id": "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.KeyVault/vaults/<KV>" }, "secretName": "sqlAdminPassword" } },
+    "nameSuffix": { "value": "01" }
+  }
+}

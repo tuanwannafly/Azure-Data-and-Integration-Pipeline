@@ -1,0 +1,23 @@
+# =============================================================================
+# Root-level Python tooling config: ruff (lint+format) is used by CI (ci.yml).
+# Kept in the repo root so every module (ingest, streaming, functions, api)
+# shares the same rules. `ruff check .` runs on every PR.
+# =============================================================================
+target-version = "py310"
+line-length = 100
+
+# Databricks notebooks use Databricks globals (dbutils, spark, display) and
+# magic comment cell separators that are not valid standard Python.
+exclude = ["databricks/notebooks"]
+
+[lint]
+# Reasonable defaults for a data project. `I` = isort (import sorting).
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = [
+    "E501",  # line length handled by formatter
+    "UP017", # keep timezone.utc (works on py310+; datetime.UTC is 3.11+ only)
+]
+
+[lint.per-file-ignores]
+# Test fixtures/mocks and __init__ files commonly break import rules.
+"**/{tests}/*" = ["F401"]

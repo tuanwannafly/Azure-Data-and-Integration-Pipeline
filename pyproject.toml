@@ -1,0 +1,9 @@
+# =============================================================================
+# pyproject at repo root: makes the workspace importable for tooling/tests
+# without needing per-module package installs. Each module keeps its own
+# requirements.txt for its Azure-bound runtime (Function/App Service/Container).
+# =============================================================================
+[tool.pytest.ini_options]
+testpaths = ["ingest/tests", "streaming/tests", "functions/tests", "api/tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"
