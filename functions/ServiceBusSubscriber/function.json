@@ -1,0 +1,13 @@
+{
+  "bindings": [
+    {
+      "name": "msg",
+      "type": "serviceBusTrigger",
+      "direction": "in",
+      "queueName": "market-ticks",
+      "connection": "ServiceBusConnection",
+      "isSessionsEnabled": false,
+      "dataType": "string"
+    }
+  ]
+}
