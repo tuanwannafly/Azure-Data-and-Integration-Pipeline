@@ -1,0 +1,67 @@
+# =============================================================================
+# CI workflow — runs lint + tests on every PR into develop/main (US-12).
+# Uses Python 3.10 to match the local dev / Function runtime target.
+#
+# pyodbc needs the Microsoft ODBC Driver 17/18 for SQL Server on Linux; we
+# install unixodbc + msodbcsql18 via the official MS package repo before
+# pip-installing the Python modules so `import pyodbc` does not fail in CI.
+# =============================================================================
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            ingest/requirements.txt
+            streaming/requirements.txt
+            functions/requirements.txt
+            api/requirements.txt
+
+      - name: Install ODBC Driver 18 for SQL Server (for pyodbc)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl gnupg apt-transport-https
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -y
+          ACCEPT_EULA=Y sudo apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r ingest/requirements.txt
+          pip install -r streaming/requirements.txt
+          pip install -r functions/requirements.txt
+          pip install -r api/requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Test (pytest)
+        env:
+          # CI runs with placeholder envs; tests mock all external calls.
+          SEC_EDGAR_USER_AGENT: "CI Bot cibot@example.com"
+        run: pytest -ra -q
