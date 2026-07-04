@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/authorizationTemplateParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "name": "LS_AzureSql",
+  "type": "Microsoft.DataFactory/factories/linkedServices",
+  "properties": {
+    "type": "AzureSqlDatabase",
+    "typeProperties": {
+      "connectionString": {
+        "type": "AzureKeyVaultSecret",
+        "store": {
+          "referenceName": "LS_KeyVault",
+          "type": "LinkedServiceReference"
+        },
+        "secretName": "azure-sql-connection-string"
+      }
+    },
+    "description": "Connection to Azure SQL Database (staging + company_revenue_yearly tables)."
+  }
+}

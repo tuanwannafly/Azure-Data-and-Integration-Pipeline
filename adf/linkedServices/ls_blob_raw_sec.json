@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/authorizationTemplateParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "name": "LS_Blob_RawSec",
+  "type": "Microsoft.DataFactory/factories/linkedServices",
+  "properties": {
+    "type": "AzureBlobStorage",
+    "typeProperties": {
+      "connectionString": {
+        "type": "AzureKeyVaultSecret",
+        "store": {
+          "referenceName": "LS_KeyVault",
+          "type": "LinkedServiceReference"
+        },
+        "secretName": "azure-storage-connection-string"
+      }
+    },
+    "description": "Connection to the raw-sec blob container (SEC EDGAR exports). Connection string is sourced from Azure Key Vault (BR-01)."
+  }
+}

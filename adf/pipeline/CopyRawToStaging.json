@@ -1,0 +1,79 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/authorizationTemplateParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "name": "PL_CopyRawToStaging",
+  "type": "Microsoft.DataFactory/factories/pipelines",
+  "properties": {
+    "description": "Copies normalized SEC EDGAR facts from Blob (raw/sec/) into the Azure SQL staging table. Tolerates NULL fields caused by schema drift across filers (BR-02). Retry policy: 2 attempts, 30s interval (BR-05).",
+    "activities": [
+      {
+        "name": "CopyRawSecToStaging",
+        "type": "Copy",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "01:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "userProperties": [],
+        "typeProperties": {
+          "source": {
+            "type": "JsonSource",
+            "storeSettings": {
+              "type": "AzureBlobStorageReadSettings",
+              "recursive": true,
+              "wildcardFolderPath": "sec",
+              "wildcardFileName": "*.json"
+            },
+            "formatSettings": {
+              "type": "JsonReadSettings"
+            }
+          },
+          "sink": {
+            "type": "AzureSqlSink",
+            "writeBehavior": "upsert",
+            "upsertSettings": {
+              "useTempDB": true,
+              "keys": [
+                "cik",
+                "fiscal_year",
+                "fiscal_period",
+                "tag_used"
+              ]
+            }
+          },
+          "enableStaging": false,
+          "translator": {
+            "type": "TabularTranslator",
+            "mappings": [
+              { "source": { "path": "['cik']" },                          "sink": { "name": "cik",          "type": "Int64" } },
+              { "source": { "path": "['company_name']" },                 "sink": { "name": "company_name", "type": "String" } },
+              { "source": { "path": "['tag_used']" },                     "sink": { "name": "tag_used",     "type": "String" } },
+              { "source": { "path": "['fiscal_year']" },                  "sink": { "name": "fiscal_year",  "type": "Int32" } },
+              { "source": { "path": "['fiscal_period']" },                "sink": { "name": "fiscal_period","type": "String" } },
+              { "source": { "path": "['form_type']" },                    "sink": { "name": "form_type",    "type": "String" } },
+              { "source": { "path": "['end_date']" },                     "sink": { "name": "end_date",     "type": "Date" } },
+              { "source": { "path": "['filed_date']" },                   "sink": { "name": "filed_date",   "type": "Date" } },
+              { "source": { "path": "['value']" },                        "sink": { "name": "value",        "type": "Decimal" } },
+              { "source": { "path": "['unit']" },                         "sink": { "name": "unit",         "type": "String" } }
+            ]
+          }
+        },
+        "inputs": [
+          {
+            "referenceName": "DS_Blob_RawSec_Json",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "DS_Sql_Staging",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+%% Azure Data Integration — Architecture (Mermaid)
+%% Render at https://mermaid.live or any Markdown viewer supporting Mermaid.
+flowchart LR
+    subgraph Batch["SEC EDGAR batch flow (P0)"]
+        SEC["SEC EDGAR<br/>companyfacts API"]
+        ADP["sec_edgar_adapter.py<br/>(flatten + fallback tags)"]
+        BLOB[("Blob Storage<br/>raw-sec")]
+        ADF["ADF Copy Activity<br/>(Blob → SQL)"]
+        STG[("SQL: staging")]
+        DBX["Databricks<br/>transform_revenue.py<br/>(dedupe + YoY)"]
+        CRY[("SQL:<br/>company_revenue_yearly")]
+        SEC --> ADP --> BLOB --> ADF --> STG --> DBX --> CRY
+    end
+
+    subgraph Stream["Finnhub streaming flow (P1)"]
+        WS["Finnhub WebSocket<br/>wss://ws.finnhub.io"]
+        PUB["finnhub_ws_publisher<br/>(Container App, always-on)"]
+        SB{{"Service Bus<br/>queue: market-ticks"}}
+        FN["Azure Function<br/>Queue Trigger subscriber"]
+        LT[("SQL: live_ticks")]
+        WS --> PUB --> SB --> FN --> LT
+    end
+
+    subgraph Expose["Expose layer"]
+        API["FastAPI App Service<br/>/revenue/yearly<br/>/market/live"]
+        APIM["APIM gateway<br/>(subscription key<br/>+ rate limit)"]
+        API --> APIM
+    end
+
+    CRY --> API
+    LT --> API
