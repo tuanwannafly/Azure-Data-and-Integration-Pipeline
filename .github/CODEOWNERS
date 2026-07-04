@@ -1,0 +1,23 @@
+# GitHub will auto-request reviews from the owners listed here. A code
+# owner is matched by the last matching pattern. Patterns use the same
+# `OWNER` syntax as CODEOWNERS (GitHub docs:
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
+#
+# For solo / 2-person projects this lets you funnel security-sensitive paths
+# (CI/CD, infra, secrets handling) through a single approver instead of any
+# contributor.
+#
+# Replace @your-handle below with the GitHub handles that should approve
+# infra changes. Until that's done, the file is inert.
+* @your-handle
+
+# Anything under infra/ or .github/ — including CI/CD definitions and
+# deploy workflows — needs an explicit extra reviewer so an unattended
+# bot PR cannot silently elevate privileges.
+infra/        @your-handle
+.github/      @your-handle
+scripts/      @your-handle
+
+# Data-engineering hotspots: the notebook performs MERGE upserts against
+# the production Azure SQL target table.
+databricks/   @your-handle

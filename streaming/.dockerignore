@@ -1,0 +1,23 @@
+# Container build context for the streaming publisher image.
+# Excludes .venv, caches, secrets, and IDE metadata so the build context is
+# small and never accidentally copies `.env` files into the image.
+**/.venv
+**/venv
+**/.env
+**/.env.*
+!**/.env.example
+**/.git
+**/.github
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.idea
+**/.vscode
+**/data
+**/tmp
+**/LICENSE
+**/README.md
+**/docs
+**/tests
+**/*.md

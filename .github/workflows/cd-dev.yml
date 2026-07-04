@@ -1,0 +1,208 @@
+# =============================================================================
+# CD/dev — auto-deploy to Azure **dev** on every push to `develop`.
+# Fast feedback loop: no approval gate, no smoke-test pause. If dev breaks,
+# push a fix; the next run replaces it.
+# =============================================================================
+name: CD/dev
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cd-dev
+  cancel-in-progress: true
+
+env:
+  ENVIRONMENT: dev
+  LOCATION: eastus
+  RESOURCE_GROUP: rg-dataintegration-dev
+  APP_BASE: dataintegration-dev
+  ACR_NAME: acrdataintegration01
+
+jobs:
+  lint:
+    # Quick re-check of lint on deploy gate; keeps the workflow self-contained
+    # so a config drift cannot bypass main CI.
+    name: "lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+
+  infra:
+    name: "Provision Azure dev"
+    uses: ./.github/workflows/cd-infra.yml
+    with:
+      environment: ${{ env.ENVIRONMENT }}
+      azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      resource_group: ${{ env.RESOURCE_GROUP }}
+      location: ${{ env.LOCATION }}
+      sql_admin_password: ${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+      azure_sql_connection_string: ${{ secrets.AZURE_SQL_CONNECTION_STRING_DEV }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SQL_ADMIN_PASSWORD: ${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+      AZURE_SQL_CONNECTION_STRING: ${{ secrets.AZURE_SQL_CONNECTION_STRING_DEV }}
+
+  build-and-push:
+    name: "Build + push streaming image"
+    needs: [lint, infra]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC) for ACR push
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build multi-arch image and push to ACR
+        uses: docker/build-push-action@v5
+        with:
+          context: streaming
+          file: streaming/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ github.sha }}
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ env.ENVIRONMENT }}
+          cache-from: type=registry,ref=${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:cache
+          cache-to: type=registry,ref=${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:cache,mode=max
+          provenance: false
+          sbom: false
+
+  deploy-api:
+    name: "Deploy FastAPI (App Service)"
+    needs: [infra, build-and-push]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy FastAPI
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: app-${{ env.APP_BASE }}
+          package: api
+
+      - name: Set App Service settings
+        uses: azure/appservice-settings@v2
+        with:
+          app-name: app-${{ env.APP_BASE }}
+          app-settings-json: >
+            {
+              "AZURE_SQL_CONNECTION_STRING": "${{ secrets.AZURE_SQL_CONNECTION_STRING_DEV }}",
+              "SCM_DO_BUILD_DURING_DEPLOYMENT": "true",
+              "ENVIRONMENT": "${{ env.ENVIRONMENT }}"
+            }
+
+  deploy-function:
+    name: "Deploy Service Bus Function"
+    needs: [infra]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Inject connection strings into settings.json (BR-01)
+        # The Functions Core Tools ZIP-deploy does not accept env vars
+        # directly; write a sanitised local.settings.json so the worker
+        # can read them at startup. We never commit this file.
+        run: |
+          cat > functions/local.settings.json <<EOF
+          {
+            "IsEncrypted": false,
+            "Values": {
+              "AzureWebJobsStorage": "${{ secrets.AZURE_STORAGE_CONNECTION_STRING_DEV }}",
+              "FUNCTIONS_WORKER_RUNTIME": "python",
+              "ServiceBusConnection": "${{ secrets.SERVICE_BUS_CONNECTION_STRING_DEV }}",
+              "AZURE_SQL_CONNECTION_STRING": "${{ secrets.AZURE_SQL_CONNECTION_STRING_DEV }}"
+            }
+          }
+          EOF
+
+      - name: ZIP-deploy Function
+        uses: azure/functions-action@v1
+        with:
+          app-name: func-${{ env.APP_BASE }}
+          package: functions
+
+  deploy-containerapp:
+    name: "Deploy Finnhub publisher (Container App)"
+    needs: [infra, build-and-push]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Container App
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          containerAppName: ca-dataintegration-ws-${{ env.ENVIRONMENT }}
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          image: ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ github.sha }}
+          envVars: |
+            FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
+            FINNHUB_SYMBOLS=${{ secrets.FINNHUB_SYMBOLS }}
+            SERVICE_BUS_CONNECTION_STRING=${{ secrets.SERVICE_BUS_CONNECTION_STRING_DEV }}
+
+  smoke-test:
+    name: "Smoke test (HTTP only)"
+    needs: [deploy-api, deploy-function, deploy-containerapp]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hit App Service health endpoint
+        run: |
+          URL="https://app-${{ env.APP_BASE }}.azurewebsites.net/health"
+          echo "GET $URL"
+          for attempt in 1 2 3 4 5; do
+            echo "Attempt $attempt / 5..."
+            if curl -fsS --max-time 30 "$URL"; then
+              echo "OK on attempt $attempt"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::App Service /health never returned 200"
+          exit 1

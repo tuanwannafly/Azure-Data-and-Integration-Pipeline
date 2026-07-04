@@ -66,5 +66,5 @@ Thumbs.db
 desktop.ini
 
 # ---------- Local one-shot scripts ----------
-setup_gitflow.ps1
+setup_gitflow*.ps1
 /tmp/

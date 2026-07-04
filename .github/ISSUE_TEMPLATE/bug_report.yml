@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a defect in any of the Azure Data Integration components.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+assignees: []
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component is affected?
+      options:
+        - ingestion (SEC EDGAR adapter / blob upload)
+        - ADF / Databricks transform
+        - Finnhub streaming (publisher / Service Bus / Function)
+        - FastAPI expose layer
+        - APIM gateway
+        - CI/CD pipeline
+        - documentation
+        - other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Run `python -m ingest.sec_edgar_adapter`
+        2. ...
+      value: |
+        1.
+        2.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Paste any relevant stack traces or attach screenshots.
+        Please redact secrets first (BR-01).
+
+  - type: dropdown
+    id: env
+    attributes:
+      label: Environment
+      options:
+        - local (venv + .env)
+        - GitHub Actions CI
+        - Azure dev
+        - Azure prod
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit SHA (if known)
+      placeholder: "git rev-parse HEAD"

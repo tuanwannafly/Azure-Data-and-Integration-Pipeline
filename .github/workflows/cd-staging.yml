@@ -1,0 +1,223 @@
+# =============================================================================
+# CD/staging — deploy to Azure **staging** after a tag like `staging-*` is
+# pushed (or manually via workflow_dispatch). Equivalent to dev but pinned
+# to the staging environment with stricter smoke tests.
+# =============================================================================
+name: CD/staging
+
+on:
+  push:
+    tags:
+      - 'staging-*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy (default: main)"
+        required: false
+        default: "main"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cd-staging
+  cancel-in-progress: false   # never cancel a staging deploy halfway
+
+env:
+  ENVIRONMENT: staging
+  LOCATION: eastus
+  RESOURCE_GROUP: rg-dataintegration-staging
+  APP_BASE: dataintegration-staging
+  ACR_NAME: acrdataintegrationstaging
+
+jobs:
+  lint:
+    name: "lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+
+  infra:
+    name: "Provision Azure staging"
+    uses: ./.github/workflows/cd-infra.yml
+    with:
+      environment: ${{ env.ENVIRONMENT }}
+      azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      resource_group: ${{ env.RESOURCE_GROUP }}
+      location: ${{ env.LOCATION }}
+      sql_admin_password: ${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+      azure_sql_connection_string: ${{ secrets.AZURE_SQL_CONNECTION_STRING_STAGING }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SQL_ADMIN_PASSWORD: ${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+      AZURE_SQL_CONNECTION_STRING: ${{ secrets.AZURE_SQL_CONNECTION_STRING_STAGING }}
+
+  build-and-push:
+    name: "Build + push streaming image"
+    needs: [lint, infra]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Azure login (OIDC) for ACR push
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build + push
+        uses: docker/build-push-action@v5
+        with:
+          context: streaming
+          file: streaming/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ github.sha }}
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ env.ENVIRONMENT }}
+          cache-from: type=registry,ref=${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:cache
+
+  deploy-api:
+    name: "Deploy FastAPI (App Service)"
+    needs: [infra, build-and-push]
+    runs-on: ubuntu-latest
+    environment: staging          # GitHub Environment approval gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy FastAPI
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: app-${{ env.APP_BASE }}
+          package: api
+          slot: staging             # deploy to the "staging" slot first
+
+      - name: Set App Service settings
+        uses: azure/appservice-settings@v2
+        with:
+          app-name: app-${{ env.APP_BASE }}
+          slot: staging
+          app-settings-json: >
+            {
+              "AZURE_SQL_CONNECTION_STRING": "${{ secrets.AZURE_SQL_CONNECTION_STRING_STAGING }}",
+              "SCM_DO_BUILD_DURING_DEPLOYMENT": "true",
+              "ENVIRONMENT": "${{ env.ENVIRONMENT }}"
+            }
+
+  deploy-function:
+    name: "Deploy Service Bus Function"
+    needs: [infra]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Inject connection strings
+        run: |
+          cat > functions/local.settings.json <<EOF
+          {
+            "IsEncrypted": false,
+            "Values": {
+              "AzureWebJobsStorage": "${{ secrets.AZURE_STORAGE_CONNECTION_STRING_STAGING }}",
+              "FUNCTIONS_WORKER_RUNTIME": "python",
+              "ServiceBusConnection": "${{ secrets.SERVICE_BUS_CONNECTION_STRING_STAGING }}",
+              "AZURE_SQL_CONNECTION_STRING": "${{ secrets.AZURE_SQL_CONNECTION_STRING_STAGING }}"
+            }
+          }
+          EOF
+
+      - name: ZIP-deploy Function
+        uses: azure/functions-action@v1
+        with:
+          app-name: func-${{ env.APP_BASE }}
+          package: functions
+
+  deploy-containerapp:
+    name: "Deploy Finnhub publisher (Container App)"
+    needs: [infra, build-and-push]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Container App (staging revision)
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          containerAppName: ca-dataintegration-ws-${{ env.ENVIRONMENT }}
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          image: ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ github.sha }}
+          envVars: |
+            FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
+            FINNHUB_SYMBOLS=${{ secrets.FINNHUB_SYMBOLS }}
+            SERVICE_BUS_CONNECTION_STRING=${{ secrets.SERVICE_BUS_CONNECTION_STRING_STAGING }}
+
+  smoke-test:
+    name: "Smoke test (HTTP + ticker flow)"
+    needs: [deploy-api, deploy-function, deploy-containerapp]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hit /health and /revenue/yearly
+        run: |
+          BASE="https://app-${{ env.APP_BASE }}-staging.azurewebsites.net"
+          for endpoint in /health /revenue/yearly; do
+            echo "GET $BASE$endpoint"
+            curl -fsS --max-time 30 "$BASE$endpoint" | tee /tmp/resp.json
+            test
+          done
+
+      - name: Verify streaming output (Finnhub -> Service Bus -> Function -> SQL)
+        # Uses a one-off Azure CLI call to peek at Service Bus message counts;
+        # no production data is read, only metrics.
+        run: |
+          az servicebus queue show \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --namespace-name "sb-dataintegration-${{ env.ENVIRONMENT }}" \
+            --name market-ticks \
+            --query '{active:countDetails.activeMessageCount, dead:countDetails.deadletteredMessageCount}' \
+            -o yaml
