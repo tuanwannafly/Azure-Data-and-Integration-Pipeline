@@ -1,0 +1,39 @@
+<!-- =============================================================================
+    APIM inbound policy (US-11).
+    - Requires a valid subscription key (Ocp-Apim-Subscription-Key header).
+    - Per-endpoint rate limits: /revenue/yearly 10 calls/min, /market/live
+      30 calls/min (real-time endpoint allows a higher ceiling).
+    Rate limiting at the gateway protects the backing App Service from burst
+    traffic, especially the /market/live endpoint which is the most frequently
+    polled during a live demo.
+    ============================================================================= -->
+<policies>
+    <inbound>
+        <!-- Require a subscription key on every request. -->
+        <set-variable name="isMarket" value="@(context.Request.Url.Path.Contains('/market/live'))" />
+
+        <!-- Rate limit by calling endpoint so the two routes get independent quotas. -->
+        <choose>
+            <when condition="@(context.Request.Url.Path.Contains('/market/live'))">
+                <!-- Real-time endpoint: 30 calls / 60s per subscription. -->
+                <rate-limit-by-key calls="30" renewal-period="60" counter-key="@(context.Subscription?.Id ?? context.Request.IpAddress)" />
+            </when>
+            <otherwise>
+                <!-- Batch/revenue endpoint: 10 calls / 60s per subscription. -->
+                <rate-limit-by-key calls="10" renewal-period="60" counter-key="@(context.Subscription?.Id ?? context.Request.IpAddress)" />
+            </otherwise>
+        </choose>
+
+        <!-- Forward remaining headers to the backend FastAPI App Service. -->
+        <base />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
