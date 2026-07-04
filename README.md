@@ -122,25 +122,102 @@ sqlcmd -S sql-dataintegration-dev.database.windows.net \
 
 Creates tables: `staging`, `company_revenue_yearly`, `live_ticks`, `watched_ciks`.
 
-### 3. GitHub Secrets (for CI/CD)
+### 3. GitHub Environment + Secrets setup (one-time, manual)
 
-Set these in **Settings → Secrets and variables → Actions**:
+The pipeline uses **OIDC Workload Identity Federation** instead of a long-lived
+service-principal secret, so GitHub never stores a credential capable of
+authenticating as the SP outside an active workflow run.
 
-| Secret | Purpose |
+**3a. Create the OIDC application**
+
+```bash
+# 1. After `az login`, run this once from any machine with Contributor rights
+#    on the subscription. The script prints the values for the next step.
+GITHUB_REPO="<org>/azure-data-integration" \
+bash scripts/setup_azure_oidc.sh
+```
+
+**3b. Create the Azure Container Registry**
+
+```bash
+export AZURE_CLIENT_ID=<printed-by-setup_azure_oidc.sh>
+bash scripts/setup_acr.sh
+```
+
+**3c. Configure GitHub**
+
+In **Settings → Secrets and variables → Actions**, add the following
+**Repository secrets**:
+
+| Secret | Source |
 |---|---|
-| `AZURE_CREDENTIALS` | Service Principal JSON (`az ad sp create-for-rbac --role Contributor`) |
-| `AZURE_SQL_ADMIN_PASSWORD` | SQL admin password for Bicep deploy |
-| `SEC_EDGAR_USER_AGENT` | SEC EDGAR User-Agent header |
-| `FINNHUB_API_KEY` | Finnhub WebSocket token |
-| `FINNHUB_SYMBOLS` | Comma-separated symbols (e.g. `AAPL,BINANCE:BTCUSDT`) |
-| `SERVICE_BUS_CONNECTION_STRING` | Service Bus namespace connection |
-| `AZURE_STORAGE_CONNECTION_STRING` | Blob Storage connection |
-| `AZURE_SQL_CONNECTION_STRING` | Azure SQL ODBC connection |
+| `AZURE_CLIENT_ID` | printed by `setup_azure_oidc.sh` |
+| `AZURE_TENANT_ID` | printed by `setup_azure_oidc.sh` |
+| `AZURE_SUBSCRIPTION_ID` | printed by `setup_azure_oidc.sh` |
+| `AZURE_SQL_ADMIN_PASSWORD` | any password you choose (≥12 chars, complex) |
+| `AZURE_SQL_CONNECTION_STRING_DEV`   | `sqlcmd`-built connection string for the **dev**   Azure SQL |
+| `AZURE_SQL_CONNECTION_STRING_STAGING` | same, for **staging** |
+| `AZURE_SQL_CONNECTION_STRING_PROD`  | same, for **prod**  |
+| `AZURE_STORAGE_CONNECTION_STRING_DEV/STAGING/PROD` | per-env storage account conn string |
+| `SERVICE_BUS_CONNECTION_STRING_DEV/STAGING/PROD` | per-env Service Bus namespace conn string |
+| `FINNHUB_API_KEY`            | free tier key from https://finnhub.io |
+| `FINNHUB_SYMBOLS`            | e.g. `AAPL,BINANCE:BTCUSDT` |
+| `SEC_EDGAR_USER_AGENT`       | your project identifier: `"Project Name you@example.com"` |
+| `CODECOV_TOKEN`              | *(optional)* upload coverage to codecov.io |
+| `DEPLOY_NOTIFY_WEBHOOK`      | *(optional)* Slack/Teams incoming-webhook URL |
 
-### 4. CI/CD
+> **Why per-env connection strings?** Each environment is a separate Azure SQL
+> server / Service Bus namespace. Keeping secrets scoped per environment means a
+> leak in one environment can't reach the others.
 
-- **CI** (`.github/workflows/ci.yml`): runs `ruff check` + `pytest` on every PR to `develop`/`main`.
-- **Deploy** (`.github/workflows/deploy.yml`): deploys Bicep + SQL schema + App Service on push to `main`.
+In **Settings → Environments**, create three environments and (optionally)
+require reviewers for `staging` and `prod`:
+
+| Environment | Required reviewers | URL pattern |
+|---|---|---|
+| `dev`     | none               | `https://app-dataintegration-dev.azurewebsites.net` |
+| `staging` | 1 team member      | `https://app-dataintegration-staging.azurewebsites.net` |
+| `prod`    | 2 team members     | `https://app-dataintegration-prod.azurewebsites.net` |
+
+In **Settings → Code security and analysis** enable Dependabot alerts and
+secret scanning. The repository ships with `.github/dependabot.yml` and
+`.gitleaks.toml` wired into CI.
+
+In **Settings → Branches → Branch protection rules**, apply the policies in
+`.github/branch-protection.md`. A `gh api` snippet is included there.
+
+**3d. Promote code through environments**
+
+```
+        ┌──── feature/* ───► PR ───► develop ───► CD/dev (auto)
+        │
+main ───┼
+        │
+        └──── tag: staging-* ─► CD/staging (slot, canary)
+              tag: v1.2.0    ─► CD/prod   (slot swap, manual approval)
+```
+
+- **`feature/* → develop`** — auto-deploy to **dev** on every push (concurrency group `cd-dev`).
+- **`tag: staging-*`** — deploy to **staging** slot; can be smoke-tested manually before swap.
+- **`tag: vX.Y.Z`** — deploy to **prod** slot, run extended smoke tests, then swap to prod. Requires 2 reviewers in the GitHub `prod` Environment.
+
+### 4. CI workflows (run on every PR / push to develop / main)
+
+| Workflow | Jobs | Trigger |
+|---|---|---|
+| `ci.yml` | `lint`, `test` (Python 3.10 + 3.11 on Linux/Windows, with coverage), `secret-scan` (gitleaks) | PR + push to develop / main |
+| `cd-dev.yml` | `lint`, `infra`, `build-and-push` (multi-arch image), `deploy-api` / `deploy-function` / `deploy-containerapp`, `smoke-test` | push to `develop` |
+| `cd-staging.yml` | same chain, but deploys to **staging** slot with extra smoke tests | push tag `staging-*` or manual |
+| `cd-prod.yml` | same chain with **slot swap** + post-swap smoke test, **rollback issue** open on failure | push tag `vX.Y.Z` or manual |
+| `cd-infra.yml` | shared `workflow_call` for provisioning Bicep + SQL schema, parameterized by environment | called by the three CD workflows |
+
+Required status checks before `main` can be merged (set in branch protection):
+
+- `CI / lint`
+- `CI / test (Python 3.10, linux)`
+- `CI / test (Python 3.11, linux)`
+- `CI / secret-scan`
+- `CD/dev / lint`
 
 ## Business rules
 
@@ -157,6 +234,13 @@ Set these in **Settings → Secrets and variables → Actions**:
 ## CI status
 
 [![CI](https://github.com/<org>/azure-data-integration/actions/workflows/ci.yml/badge.svg)](https://github.com/<org>/azure-data-integration/actions/workflows/ci.yml)
+[![CD/dev](https://github.com/<org>/azure-data-integration/actions/workflows/cd-dev.yml/badge.svg)](https://github.com/<org>/azure-data-integration/actions/workflows/cd-dev.yml)
+[![CD/staging](https://github.com/<org>/azure-data-integration/actions/workflows/cd-staging.yml/badge.svg)](https://github.com/<org>/azure-data-integration/actions/workflows/cd-staging.yml)
+[![CD/prod](https://github.com/<org>/azure-data-integration/actions/workflows/cd-prod.yml/badge.svg)](https://github.com/<org>/azure-data-integration/actions/workflows/cd-prod.yml)
+[![codecov](https://codecov.io/gh/<org>/azure-data-integration/graph/badge.svg)](https://codecov.io/gh/<org>/azure-data-integration)
+[![Dependabot](https://img.shields.io/badge/Dependabot-enabled-blue.svg)](https://docs.github.com/en/code-security/dependabot)
+
+Replace `<org>` with your GitHub org/user once you fork this repo.
 
 ## License
 

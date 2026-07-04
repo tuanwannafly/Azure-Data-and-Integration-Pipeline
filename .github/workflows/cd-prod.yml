@@ -1,0 +1,302 @@
+# =============================================================================
+# CD/prod — production deploy. Triggered ONLY by a version tag (e.g. `v1.2.0`)
+# or manually from the `Actions` tab after manual approval in the GitHub
+# Environment "prod".
+#
+# Reuses dev/staging infra deploy + App Service deployment slot pattern, but
+# the slot becomes the production slot and requires:
+#   - Azure Environment "prod" with required reviewers (Settings -> Environments)
+#   - Tag must satisfy semver pattern
+#   - Smoke test must hit /health, /revenue/yearly, /market/live
+# =============================================================================
+name: CD/prod
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'   # e.g. v1.2.0
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (tag/SHA) to deploy"
+        required: false
+        default: ""
+      skip_smoke_tests:
+        description: "Skip smoke tests (requires prod approval)"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cd-prod
+  cancel-in-progress: false   # never cancel a prod deploy
+
+env:
+  ENVIRONMENT: prod
+  LOCATION: eastus
+  RESOURCE_GROUP: rg-dataintegration-prod
+  APP_BASE: dataintegration-prod
+  ACR_NAME: acrdataintegration02
+
+jobs:
+  # ---- preflight ----
+  lint:
+    name: "lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+
+  # ---- deploy chain ----
+  infra:
+    name: "Provision Azure prod"
+    uses: ./.github/workflows/cd-infra.yml
+    with:
+      environment: ${{ env.ENVIRONMENT }}
+      azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      resource_group: ${{ env.RESOURCE_GROUP }}
+      location: ${{ env.LOCATION }}
+      sql_admin_password: ${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+      azure_sql_connection_string: ${{ secrets.AZURE_SQL_CONNECTION_STRING_PROD }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SQL_ADMIN_PASSWORD: ${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+      AZURE_SQL_CONNECTION_STRING: ${{ secrets.AZURE_SQL_CONNECTION_STRING_PROD }}
+
+  build-and-push:
+    name: "Build + push streaming image"
+    needs: [lint, infra]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Azure login (OIDC) for ACR push
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build + push + sign (cosign optional)
+        uses: docker/build-push-action@v5
+        with:
+          context: streaming
+          file: streaming/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ github.sha }}
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ env.ENVIRONMENT }}
+            ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:latest
+          cache-from: type=registry,ref=${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:cache
+
+  deploy-api-canary:
+    name: "Deploy FastAPI (production deployment slot)"
+    needs: [infra, build-and-push]
+    runs-on: ubuntu-latest
+    environment: prod              # required reviewers here (GitHub UI)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to staging slot (zero-downtime)
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: app-${{ env.APP_BASE }}
+          package: api
+          slot: staging
+
+      - name: Set App Service settings (slot)
+        uses: azure/appservice-settings@v2
+        with:
+          app-name: app-${{ env.APP_BASE }}
+          slot: staging
+          app-settings-json: >
+            {
+              "AZURE_SQL_CONNECTION_STRING": "${{ secrets.AZURE_SQL_CONNECTION_STRING_PROD }}",
+              "SCM_DO_BUILD_DURING_DEPLOYMENT": "true",
+              "ENVIRONMENT": "${{ env.ENVIRONMENT }}"
+            }
+
+  smoke-test-canary:
+    name: "Smoke test against staging slot"
+    needs: [deploy-api-canary]
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_smoke_tests != true }}
+    steps:
+      - name: Hit endpoints on slot URL
+        run: |
+          BASE="https://app-${{ env.APP_BASE }}-staging.azurewebsites.net"
+          for endpoint in /health /revenue/yearly "/market/live?symbol=AAPL"; do
+            echo "GET $BASE$endpoint"
+            curl -fsS --max-time 60 "$BASE$endpoint"
+            echo
+          done
+
+  swap-to-prod:
+    name: "Swap staging -> production"
+    needs: [deploy-api-canary, smoke-test-canary]
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Swap deployment slots
+        run: |
+          az webapp deployment slot swap \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "app-${{ env.APP_BASE }}" \
+            --slot staging \
+            --target-slot production
+
+      - name: Notify (Slack / Teams / GitHub status)
+        # Keep notification logic minimal — replace with your team's webhook.
+        run: |
+          echo "Deploy ${{ github.ref_name }} to prod completed."
+          curl -fsS -X POST \
+            "${{ secrets.DEPLOY_NOTIFY_WEBHOOK }}" \
+            --data "{\"text\":\"Prod deploy ${{ github.ref_name }} succeeded\"}" \
+            || true
+
+  deploy-function:
+    name: "Deploy Service Bus Function (prod slot)"
+    needs: [infra]
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Inject connection strings
+        run: |
+          cat > functions/local.settings.json <<EOF
+          {
+            "IsEncrypted": false,
+            "Values": {
+              "AzureWebJobsStorage": "${{ secrets.AZURE_STORAGE_CONNECTION_STRING_PROD }}",
+              "FUNCTIONS_WORKER_RUNTIME": "python",
+              "ServiceBusConnection": "${{ secrets.SERVICE_BUS_CONNECTION_STRING_PROD }}",
+              "AZURE_SQL_CONNECTION_STRING": "${{ secrets.AZURE_SQL_CONNECTION_STRING_PROD }}"
+            }
+          }
+          EOF
+
+      - name: ZIP-deploy Function (prod slot)
+        uses: azure/functions-action@v1
+        with:
+          app-name: func-${{ env.APP_BASE }}
+          package: functions
+          slot: staging
+
+      - name: Swap function slots
+        run: |
+          az functionapp deployment slot swap \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "func-${{ env.APP_BASE }}" \
+            --slot staging \
+            --target-slot production || true
+
+  deploy-containerapp:
+    name: "Deploy Finnhub publisher (Container App revision)"
+    needs: [infra, build-and-push]
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Container App revision
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          containerAppName: ca-dataintegration-ws-${{ env.ENVIRONMENT }}
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          image: ${{ env.ACR_NAME }}.azurecr.io/streaming-publisher:${{ github.sha }}
+          envVars: |
+            FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
+            FINNHUB_SYMBOLS=${{ secrets.FINNHUB_SYMBOLS }}
+            SERVICE_BUS_CONNECTION_STRING=${{ secrets.SERVICE_BUS_CONNECTION_STRING_PROD }}
+
+  smoke-test-prod:
+    name: "Smoke test against prod slot (post-swap)"
+    needs: [swap-to-prod, deploy-function, deploy-containerapp]
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_smoke_tests != true }}
+    steps:
+      - name: Hit endpoints on production URL
+        run: |
+          BASE="https://app-${{ env.APP_BASE }}.azurewebsites.net"
+          for endpoint in /health /revenue/yearly "/market/live?symbol=AAPL"; do
+            echo "GET $BASE$endpoint"
+            curl -fsS --max-time 60 "$BASE$endpoint"
+            echo
+          done
+
+  rollback:
+    # Always-true catch: if any prior job failed, post a Rollback issue
+    # rather than rolling back automatically — human-in-the-loop is
+    # mandatory for prod writes (BR-04 / least privilege).
+    name: "Open rollback issue on failure"
+    needs: [swap-to-prod, deploy-function, deploy-containerapp, smoke-test-prod]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open rollback issue
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Rollback needed for ${context.ref}`,
+              body: [
+                `The CD/prod workflow run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) failed.`,
+                ``,
+                `Please review and consider rolling back.`
+              ].join('\n'),
+              labels: ['rollback', 'prod', 'incident']
+            });

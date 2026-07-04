@@ -1,0 +1,105 @@
+# =============================================================================
+# Dependabot — weekly automated PRs for the Python deps used across the
+# project's four sub-modules. Each ecosystem entry is independent so an
+# outdated `stream/requirements.txt` does not block updates elsewhere.
+#
+# A weekly cadence balances "fresh enough to catch CVEs" against "not so noisy
+# it drowns real review work". Reviewers get a digest-like inbox.
+# =============================================================================
+version: 2
+
+updates:
+  # --- GitHub Actions: keep us on patched runner/Az runners --------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    labels:
+      - "dependencies"
+      - "ci"
+    groups:
+      actions-minor:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # --- root dev tools (ruff, pytest, etc.) --------------------------------
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    labels: ["dependencies"]
+    groups:
+      dev-tools:
+        applies-to: version-updates
+        patterns:
+          - "ruff"
+          - "pytest"
+          - "pytest-cov"
+          - "httpx"
+
+  # --- ingest module (SEC EDGAR + Blob) ----------------------------------
+  - package-ecosystem: "pip"
+    directory: "/ingest"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    labels: ["dependencies", "area/ingest"]
+    groups:
+      azure-blob:
+        patterns:
+          - "azure-storage-blob"
+          - "azure-core"
+
+  # --- streaming module (Finnhub WS + Service Bus) -----------------------
+  - package-ecosystem: "pip"
+    directory: "/streaming"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    labels: ["dependencies", "area/streaming"]
+
+  # --- functions module (Azure Function Python) --------------------------
+  - package-ecosystem: "pip"
+    directory: "/functions"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    labels: ["dependencies", "area/functions"]
+
+  # --- api module (FastAPI expose) ---------------------------------------
+  - package-ecosystem: "pip"
+    directory: "/api"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    labels: ["dependencies", "area/api"]
+
+# Ignore non-major bumps on infra packages — we pin them and update them on
+# our own cadence (security review happens separately).
+ignore:
+  - dependency-name: "azure-functions"
+    update-types: ["version-update:semver-major"]
+  - dependency-name: "fastapi"
+    update-types: ["version-update:semver-major"]
+
+# Open PRs as draft when they're infrastructure-only so reviewers can batch
+# a "merge all deps" workflow when convenient.
+open-pull-requests-limit: 10

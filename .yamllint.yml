@@ -1,0 +1,18 @@
+# yamllint config tuned for GitHub Actions YAML which routinely exceeds 80
+# chars per line (long secret references, multi-line Docker build args, etc).
+# Strict newlines + document start are enforced because GitHub Actions is
+# parser-strict on those.
+extends: default
+
+rules:
+  line-length: disable            # GitHub accepts long lines in `with:` blocks
+  document-start: disable
+  empty-lines:
+    max: 1
+    max-start: 0
+    max-end: 2
+  truthy:
+    allowed-values: ['true', 'false', 'on', 'off', 'yes', 'no']
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable

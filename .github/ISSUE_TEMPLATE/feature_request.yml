@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a new module, a configurable flag, or a refactor.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What problem are we solving?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Estimated priority
+      options:
+        - P0 — blocks a customer or a deploy
+        - P1 — wanted soon
+        - P2 — nice to have
+    validations:
+      required: true

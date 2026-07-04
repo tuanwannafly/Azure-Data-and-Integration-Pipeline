@@ -1,10 +1,22 @@
 # =============================================================================
-# CI workflow — runs lint + tests on every PR into develop/main (US-12).
-# Uses Python 3.10 to match the local dev / Function runtime target.
+# CI — runs on every PR and on every push to develop / main.
 #
-# pyodbc needs the Microsoft ODBC Driver 17/18 for SQL Server on Linux; we
-# install unixodbc + msodbcsql18 via the official MS package repo before
-# pip-installing the Python modules so `import pyodbc` does not fail in CI.
+# Three independent jobs:
+#
+#   1. lint           — `ruff check .` (style + lint rules).
+#                        ⚡ Fast, runs first so devs get a quick signal.
+#
+#   2. test           — `pytest -ra -q` on a matrix of Python versions
+#                        (3.10, 3.11). Tests use mocks for all Azure
+#                        services so no credentials are needed in CI.
+#
+#   3. secret-scan    — `gitleaks` (open-source) running on every PR.
+#                        Catches accidental commits of API keys, passwords,
+#                        connection strings, etc. — covers BR-01.
+#
+# Each job sets a unique `permissions:` block so the `GITHUB_TOKEN` is only
+# granted the scopes that job needs (least-privilege, matches the GitHub
+# recommended hardening guidance).
 # =============================================================================
 name: CI
 
@@ -13,31 +25,85 @@ on:
     branches: [main, develop]
   push:
     branches: [main, develop]
+  workflow_dispatch:
 
+# Top-level permissions: jobs must opt-in to anything beyond `contents: read`.
 permissions:
   contents: read
 
+# Cancel a previously-running CI for the same PR when a new commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  lint-test:
-    name: Lint & Test
+  # ------------------------------------------------------------------
+  # 1. Lint
+  # ------------------------------------------------------------------
+  lint:
+    name: "lint"
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: |
-            ingest/requirements.txt
-            streaming/requirements.txt
-            functions/requirements.txt
-            api/requirements.txt
+            requirements-dev.txt
 
-      - name: Install ODBC Driver 18 for SQL Server (for pyodbc)
+      - name: Install ruff (pinned via requirements-dev.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Ruff check
+        run: ruff check . --output-format=github
+
+      - name: Ruff format --check (warn only)
+        # `--check` reports diffs but does not rewrite files. We mark this
+        # step as advisory so that PRs with cosmetic-only differences do
+        # not block merge; developers run `ruff format` locally.
+        if: always()
+        continue-on-error: true
+        run: ruff format --check . || echo "::warning::ruff format check found differences; run 'ruff format .' locally"
+
+  # ------------------------------------------------------------------
+  # 2. Tests (matrix: Python 3.10 + 3.11 on linux; smoke 3.11 on Windows)
+  # ------------------------------------------------------------------
+  test:
+    name: "test (Python ${{ matrix.python-version }}, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false            # Keep the matrix running even if one leg fails.
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11"]
+        # Windows runners don't ship the Microsoft ODBC driver; skip there
+        # to avoid CWD/appveyor-style surprises. Linux runs cover the
+        # full suite.
+        exclude:
+          - os: windows-latest
+            python-version: "3.10"
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # CRITICAL: every Python process in the matrix sees a placeholder
+        # UA. Tests mock the network entirely, but a leaked exception
+        # reporting the real env value would still expose it.
+        env:
+          SEC_EDGAR_USER_AGENT: "CI Bot cibot@example.com"
+          PYTHONHASHSEED: "random"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ODBC Driver 18 for SQL Server (Linux only)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y curl gnupg apt-transport-https
@@ -48,6 +114,17 @@ jobs:
           sudo apt-get update -y
           ACCEPT_EULA=Y sudo apt-get install -y msodbcsql18 unixodbc-dev
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            ingest/requirements.txt
+            streaming/requirements.txt
+            functions/requirements.txt
+            api/requirements.txt
+            requirements-dev.txt
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -57,11 +134,52 @@ jobs:
           pip install -r functions/requirements.txt
           pip install -r api/requirements.txt
 
-      - name: Lint (ruff)
-        run: ruff check .
+      - name: Run pytest with coverage
+        # `--cov` reports coverage for the four Python modules so a missing
+        # `tests/` for any module becomes visible immediately.
+        run: |
+          pytest -ra -q \
+            --cov=ingest --cov=streaming --cov=functions.ServiceBusSubscriber --cov=api \
+            --cov-report=xml --cov-report=term-missing:skip-covered
 
-      - name: Test (pytest)
+      - name: Upload coverage to Codecov (optional)
+        # Only uploads if CODECOV_TOKEN secret is set; the absence of the
+        # secret is not an error so the job stays green on fork PRs.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
+  # ------------------------------------------------------------------
+  # 3. Secret scan (gitleaks)
+  # ------------------------------------------------------------------
+  secret-scan:
+    name: "secret-scan"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history so a leak from an old commit is still
+          # detected, not just HEAD.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
         env:
-          # CI runs with placeholder envs; tests mock all external calls.
-          SEC_EDGAR_USER_AGENT: "CI Bot cibot@example.com"
-        run: pytest -ra -q
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Custom rules live in .gitleaks.toml (ignored below if absent).
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+      - name: OS-level disallowed-files check (fallback)
+        # Belt-and-braces: surface anything .gitignore missed.
+        run: |
+          echo "Searching for committed secrets (.env*, *credentials*)..."
+          if find . -type f \( -name '.env' -o -name '*.pem' -o -name 'credentials.json' \) -not -path './node_modules/*' -print -quit | grep -q .; then
+            echo "::error::Secret-like file committed. See BR-01."
+            exit 1
+          fi

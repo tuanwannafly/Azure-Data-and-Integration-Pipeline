@@ -1,0 +1,126 @@
+# =============================================================================
+# CD/infra — shared infra deploy step (Bicep + SQL schema). Re-used by the
+# per-environment jobs. Runs once per push to main (via the staging -> prod
+# chain) and on workflow_dispatch for emergency hotfixes.
+#
+# OIDC login uses the federated credentials created by
+# scripts/setup_azure_oidc.sh — no client secret is ever copied into GitHub.
+# =============================================================================
+name: CD/infra
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Azure environment name (dev / staging / prod)"
+        required: true
+        type: string
+      azure_client_id:
+        required: true
+        type: string
+      azure_tenant_id:
+        required: true
+        type: string
+      azure_subscription_id:
+        required: true
+        type: string
+      resource_group:
+        required: true
+        type: string
+      location:
+        required: true
+        type: string
+      sql_admin_password:
+        required: true
+        type: string
+        default: ""
+      azure_sql_connection_string:
+        required: true
+        type: string
+        default: ""
+    outputs:
+      acr_login_server:
+        value: ${{ jobs.deploy-infra.outputs.acr-login-server }}
+      app_service_name:
+        value: ${{ jobs.deploy-infra.outputs.app-service-name }}
+      function_app_name:
+        value: ${{ jobs.deploy-infra.outputs.function-app-name }}
+      container_app_name:
+        value: ${{ jobs.deploy-infra.outputs.container-app-name }}
+      storage_account_name:
+        value: ${{ jobs.deploy-infra.outputs.storage-account-name }}
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      AZURE_SQL_ADMIN_PASSWORD:
+        required: false
+      AZURE_SQL_CONNECTION_STRING:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-infra:
+    name: "Provision Azure (${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    outputs:
+      acr-login-server: ${{ steps.bicep.outputs.acr_login_server }}
+      app-service-name: app-${{ inputs.environment == 'prod' && 'dataintegration-prod' || format('dataintegration-{0}', inputs.environment) }}
+      function-app-name: func-${{ inputs.environment == 'prod' && 'dataintegration-prod' || format('dataintegration-{0}', inputs.environment) }}
+      container-app-name: ${{ format('ca-dataintegration-ws-{0}', inputs.environment) }}
+      storage-account-name: ${{ format('stdataintegration{0}{1}', inputs.environment == 'prod' && '02' || '01', inputs.environment == 'dev' && '' || '') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: Ensure resource group exists
+        run: |
+          az group show --name "${{ inputs.resource_group }}" --output none 2>/dev/null || \
+          az group create \
+            --name "${{ inputs.resource_group }}" \
+            --location "${{ inputs.location }}" \
+            --tags project=azure-data-integration environment=${{ inputs.environment }}
+
+      - name: Deploy Bicep template
+        id: bicep
+        uses: azure/arm-deploy@v2
+        with:
+          resourceGroupName: ${{ inputs.resource_group }}
+          template: infra/main.bicep
+          parameters: >
+            projectName=dataintegration
+            environment=${{ inputs.environment }}
+            location=${{ inputs.location }}
+            sqlAdminPassword=${{ secrets.AZURE_SQL_ADMIN_PASSWORD }}
+          failOnStdErr: false
+
+      - name: Apply SQL schema (idempotent)
+        if: inputs.azure_sql_connection_string != ''
+        uses: azure/sql-action@v2
+        with:
+          connection-string: ${{ inputs.azure_sql_connection_string }}
+          path: infra/sql/schema.sql
+
+      - name: Capture ACR / outputs
+        id: capture
+        run: |
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name "acr${{ format('dataintegration{0}', inputs.environment == 'prod' && '02' || '01') }}" \
+            --resource-group "${{ inputs.resource_group }}" \
+            --query loginServer -o tsv 2>/dev/null || echo "")
+          echo "acr_login_server=$ACR_LOGIN_SERVER" >> "$GITHUB_OUTPUT"

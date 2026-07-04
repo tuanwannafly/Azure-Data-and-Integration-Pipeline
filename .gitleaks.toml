@@ -1,0 +1,57 @@
+# gitleaks config — focus on patterns specific to this project.
+# The default gitleaks rules already cover common provider keys (AWS, GH,
+# Slack, etc.); this file lists patterns that matter for an Azure + Python
+# data project and explicitly lets `.env.example` and the test fixtures
+# contain their placeholders.
+
+title = "Azure Data Integration gitleaks rules"
+
+# Allow placeholders in the example file and inside the test fixtures.
+[allowlist]
+  paths = [
+    '''\.env\.example$''',
+    '''tests/fixtures/.*\.json$''',
+    '''README\.md$''',
+    '''GitPlan-.*\.md$''',
+    '''docs/.*''',
+  ]
+
+# Project-specific patterns. Rules below are simple shape matchers that
+# catch clear leaks without producing false positives on REPLACE_ME tokens.
+[[rules]]
+  id = "azure-sql-connection-string"
+  description = "Azure SQL connection string with a real-looking password"
+  regex = '''Driver=\{ODBC Driver.*\};Server=tcp=[a-z0-9.\-]+;Database=[a-z0-9_]+;Uid=[^"';]+;Pwd=[A-Za-z0-9!@#$%^&*()_+={}\[\]:;"'<>,.?/~`|-]{6,};?'''
+  tags  = ["secret", "azure", "sql"]
+  keywords = ["azure", "Pwd="]
+
+[[rules]]
+  id = "azure-storage-key"
+  description = "Azure Storage account key (32-byte Base64)"
+  regex = '''AccountKey=[A-Za-z0-9+/=]{40,}'''
+  tags  = ["secret", "azure", "storage"]
+  keywords = ["AccountKey"]
+
+[[rules]]
+  id = "finnhub-api-key"
+  description = "Finnhub API key (alphanumeric, typically 20+ chars)"
+  regex = '''FINNHUB_API_KEY\s*=\s*["']?([A-Za-z0-9]{16,})["']?'''
+  tags  = ["secret", "finnhub"]
+  keywords = ["FINNHUB_API_KEY"]
+
+[[rules]]
+  id = "service-bus-shared-access"
+  description = "Service Bus shared access signature (full or partial)"
+  regex = '''SharedAccessSignature\s*=\s*[A-Za-z0-9%=&]{40,}'''
+  tags  = ["secret", "azure", "servicebus"]
+  keywords = ["SharedAccessSignature"]
+
+[[rules]]
+  id = "sec-edgar-leak"
+  # A real SEC User-Agent must contain a domain after the email. If it's
+  # not `example.com`, assume it's a personal address and treat it as PII.
+  regex = '''SEC_EDGAR_USER_AGENT\s*=\s*["'][^"']*[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}["']'''
+  tags  = ["pii", "sec"]
+  keywords = ["SEC_EDGAR_USER_AGENT"]
+  # Allow placeholders matching example.com.
+  entropy = 2.5
