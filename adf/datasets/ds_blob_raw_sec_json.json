@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/authorizationTemplateParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "name": "DS_Blob_RawSec_Json",
+  "type": "Microsoft.DataFactory/factories/datasets",
+  "properties": {
+    "type": "Json",
+    "linkedServiceName": {
+      "referenceName": "LS_Blob_RawSec",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobStorageLocation",
+        "container": "raw-sec",
+        "folderPath": "sec"
+      },
+      "encodingName": "utf-8"
+    },
+    "description": "Raw SEC EDGAR exports written by blob_ingest.py (US-02). Schema is an array of normalized annual revenue records."
+  }
+}
