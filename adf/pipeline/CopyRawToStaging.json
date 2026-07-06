@@ -47,6 +47,7 @@
           "enableStaging": false,
           "translator": {
             "type": "TabularTranslator",
+            "collectionReference": "$['records']",
             "mappings": [
               { "source": { "path": "['cik']" },                          "sink": { "name": "cik",          "type": "Int64" } },
               { "source": { "path": "['company_name']" },                 "sink": { "name": "company_name", "type": "String" } },

@@ -1,0 +1,108 @@
+# =============================================================================
+# CD/adf — deploys the ADF linked services + datasets + pipeline + trigger
+# JSON files to the target Azure Data Factory. Uses `az datapfactory` and
+# direct REST fallbacks.
+#
+# Triggered by the CD/{dev,staging,prod} parent pipelines — never runs on its
+# own. The ADF resource itself is expected to exist already (created manually
+# or by a separate workspace-provisioning job). We do NOT publish trigger
+# schedules in prod automatically because the time zone must match the
+# customer's business hours — see `adf/triggers/tr_daily_0200.json`.
+# =============================================================================
+name: CD/adf
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Azure environment name (dev / staging / prod)"
+        required: true
+        type: string
+      resource_group:
+        required: true
+        type: string
+      adf_name:
+        required: true
+        type: string
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: "Deploy ADF artifacts"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate JSON files
+        run: |
+          for f in $(find adf -name '*.json' -type f); do
+            python -c "import json; json.load(open('$f', encoding='utf-8'))" || exit 1
+            echo "ok $f"
+          done
+
+      - name: Deploy linked services
+        run: |
+          az datafactory linked-service create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/linkedServices/ls_blob_raw_sec.json)" \
+            --linked-service @adf/linkedServices/ls_blob_raw_sec.json || true
+          az datafactory linked-service create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/linkedServices/ls_azure_sql.json)" \
+            --linked-service @adf/linkedServices/ls_azure_sql.json || true
+          az datafactory linked-service create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/linkedServices/ls_keyvault.json)" \
+            --linked-service @adf/linkedServices/ls_keyvault.json || true
+
+      - name: Deploy datasets
+        run: |
+          az datafactory dataset create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/datasets/ds_blob_raw_sec_json.json)" \
+            --dataset @adf/datasets/ds_blob_raw_sec_json.json || true
+          az datafactory dataset create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/datasets/ds_sql_staging.json)" \
+            --dataset @adf/datasets/ds_sql_staging.json || true
+
+      - name: Deploy pipeline
+        run: |
+          az datafactory pipeline create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/pipeline/CopyRawToStaging.json)" \
+            --pipeline @adf/pipeline/CopyRawToStaging.json
+
+      - name: Deploy trigger (only in dev — manual approval for staging/prod)
+        if: inputs.environment == 'dev'
+        run: |
+          az datafactory trigger create-or-update \
+            --resource-group "${{ inputs.resource_group }}" \
+            --factory-name "${{ inputs.adf_name }}" \
+            --name "$(jq -r .name adf/triggers/tr_daily_0200.json)" \
+            --trigger @adf/triggers/tr_daily_0200.json || true

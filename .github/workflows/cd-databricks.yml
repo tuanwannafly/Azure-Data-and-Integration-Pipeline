@@ -1,0 +1,102 @@
+# =============================================================================
+# CD/databricks — publishes the PySpark transform notebook to the Databricks
+# workspace. Idempotent: import-notebook either creates the notebook at the
+# target path or overwrites it in place (Databricks supports this).
+#
+# The Bicep deploy in cd-infra.yml does NOT create the Databricks workspace
+# (it is intentionally scoped to Azure Storage / SQL / Service Bus to keep
+# infra cost and time small). The workspace is expected to exist already.
+# =============================================================================
+name: CD/databricks
+
+on:
+  push:
+    branches: [develop]
+    tags:
+      - 'staging-*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to publish (default: branch/tag that triggered)"
+        required: false
+        default: ""
+      environment:
+        description: "Databricks workspace environment (dev / staging / prod)"
+        required: false
+        type: choice
+        default: dev
+        options:
+          - dev
+          - staging
+          - prod
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-databricks-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  publish-notebook:
+    name: "Publish transform notebook"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Databricks login (OIDC)
+        if: env.DATABRICKS_HOST != ''
+        uses: databricks/setup-cli@main
+        with:
+          host: ${{ env.DATABRICKS_HOST }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+
+      - name: Validate notebook source is parseable Python
+        # Sanity-check the notebook's non-magic lines so a malformed commit is
+        # caught here, not on a failed Databricks import.
+        run: |
+          py -c "
+          import re, sys
+          src = open('databricks/notebooks/transform_revenue.py', 'r', encoding='utf-8').read()
+          # Strip magic comment lines and cell separators — the rest should compile.
+          stripped = '\n'.join(
+              l for l in src.splitlines()
+              if not l.startswith('# MAGIC') and not l.startswith('# COMMAND')
+          )
+          try:
+              compile(stripped, 'transform_revenue.py', 'exec')
+              print('notebook parses cleanly')
+          except SyntaxError as e:
+              print(f'SyntaxError: {e}')
+              sys.exit(1)
+          "
+
+      - name: Upload notebook to workspace (dev / staging / prod)
+        # Databricks Import-Notebook API is idempotent: when path exists it
+        # overwrites, when it does not, it creates. Safe to re-run.
+        env:
+          DATABRICKS_HOST: ${{ secrets[format('DATABRICKS_HOST_{0}', inputs.environment || 'dev')] }}
+          DATABRICKS_TOKEN: ${{ secrets[format('DATABRICKS_TOKEN_{0}', inputs.environment || 'dev')] }}
+          NOTEBOOK_TARGET_PATH: /Shared/transform_revenue
+        run: |
+          if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+            echo "::error::Missing DATABRICKS_HOST_${environment}/DATABRICKS_TOKEN_${environment} secret."
+            exit 1
+          fi
+          # Strip Databricks-specific `# MAGIC` and `# COMMAND` markers — the
+          # Import-Notebook API expects raw Python source.
+          python scripts/extract_databricks_notebook.py \
+            --input databricks/notebooks/transform_revenue.py \
+            --output /tmp/transform_revenue_clean.py
+          python scripts/databricks_upload_notebook.py \
+            --host "$DATABRICKS_HOST" \
+            --token "$DATABRICKS_TOKEN" \
+            --path "$NOTEBOOK_TARGET_PATH" \
+            --source /tmp/transform_revenue_clean.py \
+            --language PYTHON

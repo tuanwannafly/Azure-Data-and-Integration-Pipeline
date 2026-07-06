@@ -69,7 +69,10 @@ def test_parse_tick_unsupported_type_raises():
 def test_upsert_tick_executes_merge_with_correct_params():
     conn = MagicMock()
     cursor = MagicMock()
-    conn.cursor.return_value.__enter__.return_value = cursor
+    # upsert_tick calls conn.cursor() (not as a context manager); returning
+    # the same MagicMock each time satisfies both the bare .cursor() and the
+    # `with conn.cursor() as cur` form some drivers expose.
+    conn.cursor.return_value = cursor
 
     tick = {
         "symbol": "AAPL",
@@ -83,15 +86,16 @@ def test_upsert_tick_executes_merge_with_correct_params():
     cursor.execute.assert_called_once()
     args, kwargs = cursor.execute.call_args
     sql = args[0]
-    params = list(args[1:])
-    # MERGE statement must reference dbo.live_ticks and ON (symbol).
+    # pymssql binds parameters positionally as a single tuple; pyodbc would
+    # pass them as separate args. Either way the tuple contents must match.
+    params = args[1] if len(args) > 1 else kwargs.get("parameters")
+    if isinstance(params, tuple) and len(params) == 1 and isinstance(params[0], tuple):
+        params = params[0]
     assert "MERGE INTO dbo.live_ticks" in sql
     assert "ON (target.symbol = source.symbol)" in sql
-    # WHEN MATCHED branch must UPDATE — no INSERT (upsert semantics).
     assert "WHEN MATCHED THEN" in sql
     assert "WHEN NOT MATCHED THEN" in sql
-    # Parameters bound positionally.
-    assert params == [
+    assert list(params) == [
         "AAPL",
         195.12,
         100.0,
@@ -107,7 +111,7 @@ def test_upsert_tick_raises_when_db_call_fails():
     conn = MagicMock()
     cursor = MagicMock()
     cursor.execute.side_effect = RuntimeError("transient")
-    conn.cursor.return_value.__enter__.return_value = cursor
+    conn.cursor.return_value = cursor
 
     tick = {"symbol": "AAPL", "price": 1.0, "volume": 1.0,
             "trade_timestamp": 1, "received_at": "x"}

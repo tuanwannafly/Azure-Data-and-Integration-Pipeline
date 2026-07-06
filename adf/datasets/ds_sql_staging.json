@@ -12,19 +12,6 @@
     "typeProperties": {
       "tableName": "[dbo].[staging]"
     },
-    "schema": [
-      { "name": "cik", "type": "Int64" },
-      { "name": "company_name", "type": "String" },
-      { "name": "tag_used", "type": "String" },
-      { "name": "fiscal_year", "type": "Int32" },
-      { "name": "fiscal_period", "type": "String" },
-      { "name": "form_type", "type": "String" },
-      { "name": "end_date", "type": "Date" },
-      { "name": "filed_date", "type": "Date" },
-      { "name": "value", "type": "Decimal" },
-      { "name": "unit", "type": "String" },
-      { "name": "ingested_at", "type": "DateTime" }
-    ],
     "description": "Staging table for normalized SEC EDGAR facts (US-03). Allows NULLs to tolerate schema drift across filers (BR-02)."
   }
 }

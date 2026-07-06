@@ -43,7 +43,7 @@ from ingest.config import (
     RAW_EXPORT_DIR,
     SEC_FACTS_URL_TEMPLATE,
     SEC_REQUEST_DELAY_SECONDS,
-    WATCHED_CIKS,
+    get_watched_ciks,
 )
 from ingest.tag_fallback_map import pick_revenue_tag
 
@@ -204,7 +204,7 @@ def run_full_ingest(
 
     Returns the path to the written file (consumed by blob_ingest.py / US-02).
     """
-    watched = watched_ciks if watched_ciks is not None else WATCHED_CIKS
+    watched = watched_ciks if watched_ciks is not None else get_watched_ciks()
     out_dir = Path(output_dir or RAW_EXPORT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
 

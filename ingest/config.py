@@ -37,3 +37,22 @@ SEC_REQUEST_DELAY_SECONDS = 0.15
 
 # Default output directory for raw JSON export (git-ignored).
 RAW_EXPORT_DIR = os.getenv("RAW_EXPORT_DIR", "data")
+
+
+def get_watched_ciks() -> list[dict[str, object]]:
+    """Resolve the watched-CIK list at runtime.
+
+    Reading env vars on every call avoids mutating module state at import time
+    (which is bad practice: importing the module from tests can change the
+    observed list if tests patch the env). Returns either the CIKS env override
+    (when set to a digit-only comma list) or the static WATCHED_CIKS default.
+    """
+    raw = os.getenv("CIKS")
+    if raw:
+        parsed: list[dict[str, object]] = []
+        for token in (t.strip() for t in raw.split(",")):
+            if token.isdigit():
+                parsed.append({"cik": int(token), "company_name": f"CIK {token}"})
+        if parsed:
+            return parsed
+    return list(WATCHED_CIKS)

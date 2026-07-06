@@ -12,7 +12,7 @@
           "referenceName": "LS_KeyVault",
           "type": "LinkedServiceReference"
         },
-        "secretName": "azure-sql-connection-string"
+        "secretName": "azure-sql-connection-string-adf"
       }
     },
     "description": "Connection to Azure SQL Database (staging + company_revenue_yearly tables)."

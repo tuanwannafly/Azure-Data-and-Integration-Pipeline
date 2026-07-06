@@ -6,6 +6,12 @@
 #
 # Image size is intentionally small (python:3.11-slim + layer-cached deps) so
 # pulls are cheap during frequent CI/CD deploys.
+#
+# Health probe: this container exposes a tiny HTTP health endpoint on $PORT
+# (default 8080) via a parallel thread. Azure Container Apps' liveness probe
+# hits it; a 200 OK means "publisher process is alive" (it does NOT verify
+# the Finnhub WebSocket is currently connected — reconnect is exponential
+# backoff and we don't want a temporary outage to restart the container).
 # =============================================================================
 FROM python:3.11-slim AS base
 
@@ -30,7 +36,8 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 # ---- application layer ----
 COPY streaming/ /app/streaming/
-COPY ingest/    /app/ingest/      # shared env-var helpers re-used at runtime
+# shared env-var helpers re-used at runtime
+COPY ingest/    /app/ingest/
 COPY pyproject.toml /app/pyproject.toml
 COPY README.md     /app/README.md
 
@@ -38,14 +45,15 @@ COPY README.md     /app/README.md
 RUN chown -R app:app /app
 USER app
 
-# Container Apps inject $PORT; the publisher has no HTTP listener (it only
-# opens an outbound WebSocket), so we ignore $PORT. HEALTHCHECK via a tiny
-# helper process (see below) is a bonus but optional.
+# Container Apps inject $PORT; the publisher exposes a tiny HTTP health
+# server on this port alongside the long-lived WS connection. The
+# entrypoint script starts the health server first so liveness probes succeed
+# even if the WebSocket is briefly reconnecting.
 EXPOSE 8080
 
 # Default to the publisher entry point. Override `cmd` in Container App
 # deployment if you need a different module/function.
-CMD ["python", "-m", "streaming.finnhub_ws_publisher"]
+CMD ["python", "-m", "streaming.container_entrypoint"]
 
 
 # =============================================================================

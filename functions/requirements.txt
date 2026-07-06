@@ -1,3 +1,2 @@
-# Azure Function (Service Bus subscriber) dependencies
 azure-functions>=1.20.0
-pyodbc>=5.1.0
+pymssql>=2.3.0

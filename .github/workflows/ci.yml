@@ -7,8 +7,10 @@
 #                        ⚡ Fast, runs first so devs get a quick signal.
 #
 #   2. test           — `pytest -ra -q` on a matrix of Python versions
-#                        (3.10, 3.11). Tests use mocks for all Azure
-#                        services so no credentials are needed in CI.
+#                        (3.10, 3.11) × OS (ubuntu, windows). Tests use mocks
+#                        for all Azure services so no credentials are needed.
+#                        No system ODBC driver is installed — pymssql bundles
+#                        FreeTDS as a wheel and runs on Linux & Windows alike.
 #
 #   3. secret-scan    — `gitleaks` (open-source) running on every PR.
 #                        Catches accidental commits of API keys, passwords,
@@ -72,7 +74,7 @@ jobs:
         run: ruff format --check . || echo "::warning::ruff format check found differences; run 'ruff format .' locally"
 
   # ------------------------------------------------------------------
-  # 2. Tests (matrix: Python 3.10 + 3.11 on linux; smoke 3.11 on Windows)
+  # 2. Tests (matrix: Python 3.10 + 3.11 × linux/windows)
   # ------------------------------------------------------------------
   test:
     name: "test (Python ${{ matrix.python-version }}, ${{ matrix.os }})"
@@ -82,12 +84,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11"]
-        # Windows runners don't ship the Microsoft ODBC driver; skip there
-        # to avoid CWD/appveyor-style surprises. Linux runs cover the
-        # full suite.
-        exclude:
-          - os: windows-latest
-            python-version: "3.10"
     permissions:
       contents: read
     defaults:
@@ -102,17 +98,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ODBC Driver 18 for SQL Server (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install ODBC driver no longer needed
+        # The project switched from pyodbc → pymssql in commit ... (2026-07-06)
+        # because the Functions Consumption Plan and App Service Linux built-in
+        # image do not ship the Microsoft ODBC Driver for SQL Server. pymssql
+        # bundles its own FreeTDS driver as a pip wheel — no system package
+        # required at runtime.
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl gnupg apt-transport-https
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-            | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -y
-          ACCEPT_EULA=Y sudo apt-get install -y msodbcsql18 unixodbc-dev
+          echo "No system ODBC driver required — pymssql is self-contained."
+          echo "FreeTDS wheels ship libsybdb; nothing else to install."
 
       - uses: actions/setup-python@v5
         with:

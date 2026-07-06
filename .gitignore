@@ -68,3 +68,19 @@ desktop.ini
 # ---------- Local one-shot scripts ----------
 setup_gitflow*.ps1
 /tmp/
+
+# ---------- Azure CLI / PowerShell artifacts ----------
+# These are written by ad-hoc `az`/`az apim api operation ...` invocations and
+# have no place in the repo — they are debug output, not source.
+app-deploy.zip
+operations.json
+sub_body.json
+sub_result.json
+policy_body.json
+policy_market_body.json
+policy_revenue_body.json
+*_props.json
+*_body.json
+
+# ---------- Codacy CLI cache ----------
+.codacy/cache/

@@ -1,0 +1,19 @@
+<policies>
+    <inbound>
+        <base />
+        <!-- Batch/revenue endpoint: 10 calls / 60s per subscription.
+             rate-limit (not rate-limit-by-key) is the only rate-limiting
+             policy allowed on the Consumption tier; it counts per
+             subscription automatically, no custom counter-key needed. -->
+        <rate-limit calls="10" renewal-period="60" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

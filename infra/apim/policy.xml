@@ -10,11 +10,11 @@
 <policies>
     <inbound>
         <!-- Require a subscription key on every request. -->
-        <set-variable name="isMarket" value="@(context.Request.Url.Path.Contains('/market/live'))" />
+        <set-variable name="isMarket" value="@(context.Request.Url.Path.Contains(&quot;/market/live&quot;))" />
 
         <!-- Rate limit by calling endpoint so the two routes get independent quotas. -->
         <choose>
-            <when condition="@(context.Request.Url.Path.Contains('/market/live'))">
+            <when condition="@(context.Request.Url.Path.Contains(&quot;/market/live&quot;))">
                 <!-- Real-time endpoint: 30 calls / 60s per subscription. -->
                 <rate-limit-by-key calls="30" renewal-period="60" counter-key="@(context.Subscription?.Id ?? context.Request.IpAddress)" />
             </when>

@@ -1,5 +1,7 @@
 # Azure Data & Integration Pipeline
 
+> **Current release: v1.1.0** — full CI/CD pipeline (OIDC Workload Identity, multi-env matrix, slot-swap prod deploys, ADF + Databricks publish, gitleaks secret-scan, Dependabot, slot health probes). See the [CHANGELOG / releases](https://github.com/<org>/azure-data-integration/releases) for details.
+>
 > End-to-end data integration pipeline covering **ingest → orchestrate (ADF) → transform (Databricks) → event-driven (Service Bus / Function) → expose (FastAPI) → gateway (APIM)**, with CI/CD via GitHub Actions.
 >
 > Two real data sources (no mocks): **SEC EDGAR** (batch REST, financial facts) and **Finnhub** (real-time WebSocket trade ticks).
@@ -201,23 +203,43 @@ main ───┼
 - **`tag: staging-*`** — deploy to **staging** slot; can be smoke-tested manually before swap.
 - **`tag: vX.Y.Z`** — deploy to **prod** slot, run extended smoke tests, then swap to prod. Requires 2 reviewers in the GitHub `prod` Environment.
 
-### 4. CI workflows (run on every PR / push to develop / main)
+### 4. CI/CD workflows
 
 | Workflow | Jobs | Trigger |
 |---|---|---|
-| `ci.yml` | `lint`, `test` (Python 3.10 + 3.11 on Linux/Windows, with coverage), `secret-scan` (gitleaks) | PR + push to develop / main |
+| `ci.yml` | `lint`, `test` (Python 3.10 + 3.11 on Linux + Windows, with coverage), `secret-scan` (gitleaks) | PR + push to develop / main |
 | `cd-dev.yml` | `lint`, `infra`, `build-and-push` (multi-arch image), `deploy-api` / `deploy-function` / `deploy-containerapp`, `smoke-test` | push to `develop` |
 | `cd-staging.yml` | same chain, but deploys to **staging** slot with extra smoke tests | push tag `staging-*` or manual |
 | `cd-prod.yml` | same chain with **slot swap** + post-swap smoke test, **rollback issue** open on failure | push tag `vX.Y.Z` or manual |
 | `cd-infra.yml` | shared `workflow_call` for provisioning Bicep + SQL schema, parameterized by environment | called by the three CD workflows |
+| `cd-adf.yml` | shared `workflow_call` to publish ADF linked services / datasets / pipeline / trigger JSON to the target factory | called by the three CD workflows |
+| `cd-databricks.yml` | publishes the PySpark transform notebook to the Databricks workspace (idempotent overwrite) | push to develop / staging tag / prod tag |
+
+> **No system ODBC driver is installed in CI.** Both the Function and FastAPI
+> use `pymssql`, which bundles its own FreeTDS driver as a pip wheel and
+> works on Linux + Windows without any apt package.
 
 Required status checks before `main` can be merged (set in branch protection):
 
 - `CI / lint`
-- `CI / test (Python 3.10, linux)`
-- `CI / test (Python 3.11, linux)`
+- `CI / test (Python 3.10, ubuntu-latest)`
+- `CI / test (Python 3.11, ubuntu-latest)`
+- `CI / test (Python 3.10, windows-latest)`
+- `CI / test (Python 3.11, windows-latest)`
 - `CI / secret-scan`
 - `CD/dev / lint`
+
+### 5. Why pymssql, not pyodbc?
+
+`pyodbc` requires the **Microsoft ODBC Driver for SQL Server** as a system
+package. The Azure Functions Linux Consumption Plan and App Service Linux
+built-in image do not ship that driver, so `pyodbc.connect()` crashed at
+runtime (worker boot-loops, dead-letter with no exception visible in
+Application Insights). `pymssql` ships its own FreeTDS-based driver as a
+pip wheel — no system package, works identically on Functions / App Service
+/ Container Apps / local dev. Connection-string parsing was retained
+(compatible with the ODBC `key=value;key=value` format) so the `BR-01`
+git-ignored `.env` values do not need to change.
 
 ## Business rules
 

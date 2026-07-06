@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/authorizationTemplateParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "name": "LS_KeyVault",
+  "type": "Microsoft.DataFactory/factories/linkedServices",
+  "properties": {
+    "type": "AzureKeyVault",
+    "typeProperties": {
+      "baseUrl": "https://kv-dataint-a3x9b.vault.azure.net/"
+    },
+    "description": "Reference to Azure Key Vault holding SQL and Storage connection strings (BR-01)."
+  }
+}
